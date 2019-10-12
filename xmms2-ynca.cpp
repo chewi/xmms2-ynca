@@ -28,23 +28,21 @@ private:
 	const std::string command;
 	boost::asio::io_service io_service;
 	tcp::socket socket;
+	tcp::resolver resolver;
+	tcp::resolver::query resolver_query;
 	Xmms::Client client;
 	std::time_t last;
-
-	tcp::resolver::iterator endpoints;
 };
 
 Xmms2YncaHandler::Xmms2YncaHandler(const std::string &host, const int port, const std::string &input) :
 	command("@MAIN:PWR=On\r\n@MAIN:INP=" + input + "\r\n"),
 	io_service(),
 	socket(io_service),
+	resolver(io_service),
+	resolver_query(host, std::to_string(port)),
 	client("xmms2-ynca"),
 	last(0)
 {
-	tcp::resolver resolver(io_service);
-	tcp::resolver::query query(host, std::to_string(port));
-	endpoints = resolver.resolve(query);
-
 	client.connect(std::getenv("XMMS_PATH"));
 	client.playback.broadcastStatus()(Xmms::bind(&Xmms2YncaHandler::event_handler, this), Xmms::bind(&Xmms2YncaHandler::error_handler, this));
 	client.setMainloop(new Xmms::GMainloop(client.getConnection()));
@@ -67,6 +65,7 @@ bool Xmms2YncaHandler::event_handler(const Xmms::Playback::Status status) {
 	last = now;
 
 	try {
+		tcp::resolver::iterator endpoints = resolver.resolve(resolver_query);
 		boost::asio::connect(socket, endpoints);
 		socket.write_some(boost::asio::buffer(command));
 	} catch (std::exception& e) {
