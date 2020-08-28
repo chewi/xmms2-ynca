@@ -1,4 +1,5 @@
 #include <boost/asio.hpp>
+#include <boost/optional.hpp>
 #include <boost/program_options.hpp>
 #include <ctime>
 #include <fstream>
@@ -10,22 +11,26 @@
 #include <xmmsclient/xmmsclient++.h>
 
 using boost::asio::ip::tcp;
+using boost::optional;
 namespace po = boost::program_options;
 
 static GMainLoop *ml;
 
 class Xmms2YncaHandler {
 public:
-	Xmms2YncaHandler(const std::string &host, const int port, const std::string &input);
+	Xmms2YncaHandler(const std::string &host, const int port, const std::string &input, const optional<std::string> &default_program);
 	~Xmms2YncaHandler() = default;
 
 	void setDisconnectCallback(const Xmms::DisconnectCallback::value_type &callback);
 
 private:
-	bool event_handler(const Xmms::Playback::Status status);
-	bool error_handler(const std::string& error);
+	bool event_handler(const int id);
+	bool error_handler(const std::string &error);
+	void send_command(const std::string &command);
+	bool send_command_with_program(const Xmms::PropDict &info);
 
-	const std::string command;
+	const std::string input_command;
+	const optional<std::string> default_program;
 	boost::asio::io_service io_service;
 	tcp::socket socket;
 	tcp::resolver resolver;
@@ -34,8 +39,9 @@ private:
 	std::time_t last;
 };
 
-Xmms2YncaHandler::Xmms2YncaHandler(const std::string &host, const int port, const std::string &input) :
-	command("@MAIN:PWR=On\r\n@MAIN:INP=" + input + "\r\n"),
+Xmms2YncaHandler::Xmms2YncaHandler(const std::string &host, const int port, const std::string &input, const optional<std::string> &default_program) :
+	input_command("@MAIN:PWR=On\r\n@MAIN:INP=" + input + "\r\n"),
+	default_program(default_program),
 	io_service(),
 	socket(io_service),
 	resolver(io_service),
@@ -44,7 +50,7 @@ Xmms2YncaHandler::Xmms2YncaHandler(const std::string &host, const int port, cons
 	last(0)
 {
 	client.connect(std::getenv("XMMS_PATH"));
-	client.playback.broadcastStatus()(Xmms::bind(&Xmms2YncaHandler::event_handler, this), Xmms::bind(&Xmms2YncaHandler::error_handler, this));
+	client.playback.broadcastCurrentID()(Xmms::bind(&Xmms2YncaHandler::event_handler, this), Xmms::bind(&Xmms2YncaHandler::error_handler, this));
 	client.setMainloop(new Xmms::GMainloop(client.getConnection()));
 }
 
@@ -52,10 +58,7 @@ void Xmms2YncaHandler::setDisconnectCallback(const Xmms::DisconnectCallback::val
 	client.setDisconnectCallback(callback);
 }
 
-bool Xmms2YncaHandler::event_handler(const Xmms::Playback::Status status) {
-	if (status != XMMS_PLAYBACK_STATUS_PLAY)
-		return true;
-
+bool Xmms2YncaHandler::event_handler(const int id) {
 	auto now = std::time(nullptr);
 
 	if (now - last < 5) {
@@ -64,23 +67,62 @@ bool Xmms2YncaHandler::event_handler(const Xmms::Playback::Status status) {
 
 	last = now;
 
+	if (default_program) {
+		try {
+			Xmms::PropDictResult res = client.medialib.getInfo(id);
+			res.connect(Xmms::bind(&Xmms2YncaHandler::send_command_with_program, this));
+			res.connectError(Xmms::bind(&Xmms2YncaHandler::error_handler, this));
+			res();
+		} catch (std::exception &e) {
+			std::cerr << e.what() << std::endl;
+		}
+	} else {
+		send_command(input_command);
+	}
+
+	return true;
+}
+
+bool Xmms2YncaHandler::error_handler(const std::string &error) {
+	std::cerr << "Error: " << error << std::endl;
+	return true;
+}
+
+void Xmms2YncaHandler::send_command(const std::string &command) {
 	try {
 		tcp::resolver::iterator endpoints = resolver.resolve(resolver_query);
 		boost::asio::connect(socket, endpoints);
 		socket.write_some(boost::asio::buffer(command));
-	} catch (std::exception& e) {
+	} catch (std::exception &e) {
 		std::cerr << e.what() << std::endl;
 	}
 
 	try { socket.close(); }
 	catch(...) {}
-
-	return true;
 }
 
-bool Xmms2YncaHandler::error_handler(const std::string& error) {
-	std::cerr << "Error: " << error << std::endl;
-	return true;
+bool Xmms2YncaHandler::send_command_with_program(const Xmms::PropDict &info) {
+	std::string command = input_command + "@MAIN:";
+
+	try {
+		std::string program = boost::get<std::string>(info["ynca_program"]);
+		command.append("SOUNDPRG=" + program + "\r\n");
+	} catch (Xmms::no_such_key_error &err) {
+		try {
+			int channels = boost::get<int>(info["channels"]);
+
+			if (channels > 2) {
+				command.append("STRAIGHT=On\r\n");
+			} else {
+				command.append("SOUNDPRG=" + *default_program + "\r\n");
+			}
+		} catch (Xmms::no_such_key_error &err) {
+			command.append("SOUNDPRG=" + *default_program + "\r\n");
+		}
+	}
+
+	send_command(command);
+	return false;
 }
 
 void onDisconnect() {
@@ -90,11 +132,13 @@ void onDisconnect() {
 int main() {
 	po::variables_map vm;
 	po::options_description config("Configuration");
+	optional<std::string> default_program;
 
 	config.add_options()
 		("host", po::value<std::string>(), "Yamaha AV hostname")
 		("port", po::value<int>()->default_value(50000), "Yamaha AV port")
 		("input", po::value<std::string>(), "Yamaha AV input for XMMS2")
+		("default-program", po::value(&default_program), "Yamaha AV default sound program name")
 		;
 
 	std::ifstream ifs(Xmms::getUserConfDir() + "/clients/ynca.conf");
@@ -118,14 +162,19 @@ int main() {
 	}
 
 	try {
-		Xmms2YncaHandler handler(vm["host"].as<std::string>(), vm["port"].as<int>(), vm["input"].as<std::string>());
+		Xmms2YncaHandler handler(
+			vm["host"].as<std::string>(),
+			vm["port"].as<int>(),
+			vm["input"].as<std::string>(),
+			default_program
+		);
 
 		ml = g_main_loop_new(NULL, FALSE);
 		handler.setDisconnectCallback(onDisconnect);
 		g_main_loop_run(ml);
 
 		return EXIT_SUCCESS;
-	} catch(Xmms::connection_error& err) {
+	} catch(Xmms::connection_error &err) {
 		std::cerr << "Could not connect: " << err.what() << std::endl;
 		return EXIT_FAILURE;
 	}
