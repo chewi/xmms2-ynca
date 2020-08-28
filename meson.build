@@ -6,4 +6,6 @@ threads = dependency('threads')
 xmms2 = dependency('xmms2-client-cpp')
 xmms2_glib = dependency('xmms2-client-cpp-glib')
 
-executable('xmms2-ynca', 'xmms2-ynca.cpp', dependencies : [boost, glib, threads, xmms2, xmms2_glib])
+fs = import('fs')
+executable('xmms2-ynca', 'xmms2-ynca.cpp', dependencies : [boost, glib, threads, xmms2, xmms2_glib], install : true, install_dir : fs.expanduser('~/.config/xmms2/startup.d'))
+install_data('ynca.conf', install_dir : fs.expanduser('~/.config/xmms2/clients'))
