@@ -1,4 +1,4 @@
-project('xmms2-ynca', 'cpp')
+project('xmms2-ynca', 'cpp', default_options : ['cpp_std=gnu++17'])
 
 boost = dependency('boost', modules : ['system', 'program_options'])
 glib = dependency('glib-2.0')

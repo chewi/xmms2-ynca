@@ -18,11 +18,13 @@
 #include <boost/asio.hpp>
 #include <boost/optional.hpp>
 #include <boost/program_options.hpp>
+#include <chrono>
 #include <ctime>
 #include <fstream>
 #include <glib.h>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 #include <xmmsclient/xmmsclient++-glib.h>
 #include <xmmsclient/xmmsclient++.h>
@@ -43,10 +45,14 @@ public:
 private:
 	bool event_handler(const int id);
 	bool error_handler(const std::string &error);
-	void send_command(const std::string &command);
-	bool send_command_with_program(const Xmms::PropDict &info);
 
+	void send_commands(const std::vector<const std::string*> &commands);
+	bool send_commands_with_program(const Xmms::PropDict &info);
+
+	inline static const std::string on_command = "@MAIN:PWR=On";
 	const std::string input_command;
+	std::vector<const std::string*> input_commands;
+
 	const optional<std::string> default_program;
 	boost::asio::io_service io_service;
 	tcp::socket socket;
@@ -57,7 +63,7 @@ private:
 };
 
 Xmms2YncaHandler::Xmms2YncaHandler(const std::string &host, const int port, const std::string &input, const optional<std::string> &default_program) :
-	input_command("@MAIN:PWR=On\r\n@MAIN:INP=" + input + "\r\n"),
+	input_command("@MAIN:INP=" + input),
 	default_program(default_program),
 	io_service(),
 	socket(io_service),
@@ -66,6 +72,9 @@ Xmms2YncaHandler::Xmms2YncaHandler(const std::string &host, const int port, cons
 	client("xmms2-ynca"),
 	last(0)
 {
+	input_commands.push_back(&on_command);
+	input_commands.push_back(&input_command);
+
 	client.connect(std::getenv("XMMS_PATH"));
 	client.playback.broadcastCurrentID()(Xmms::bind(&Xmms2YncaHandler::event_handler, this), Xmms::bind(&Xmms2YncaHandler::error_handler, this));
 	client.setMainloop(new Xmms::GMainloop(client.getConnection()));
@@ -87,14 +96,14 @@ bool Xmms2YncaHandler::event_handler(const int id) {
 	if (default_program) {
 		try {
 			Xmms::PropDictResult res = client.medialib.getInfo(id);
-			res.connect(Xmms::bind(&Xmms2YncaHandler::send_command_with_program, this));
+			res.connect(Xmms::bind(&Xmms2YncaHandler::send_commands_with_program, this));
 			res.connectError(Xmms::bind(&Xmms2YncaHandler::error_handler, this));
 			res();
 		} catch (std::exception &e) {
 			std::cerr << e.what() << std::endl;
 		}
 	} else {
-		send_command(input_command);
+		send_commands(input_commands);
 	}
 
 	return true;
@@ -105,11 +114,15 @@ bool Xmms2YncaHandler::error_handler(const std::string &error) {
 	return true;
 }
 
-void Xmms2YncaHandler::send_command(const std::string &command) {
+void Xmms2YncaHandler::send_commands(const std::vector<const std::string*> &commands) {
 	try {
 		tcp::resolver::iterator endpoints = resolver.resolve(resolver_query);
 		boost::asio::connect(socket, endpoints);
-		socket.write_some(boost::asio::buffer(command));
+
+		for (std::vector<const std::string*>::const_iterator command = commands.begin(); command != commands.end(); ++command) {
+			socket.write_some(boost::asio::buffer(**command + "\r\n"));
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
 	} catch (std::exception &e) {
 		std::cerr << e.what() << std::endl;
 	}
@@ -118,27 +131,30 @@ void Xmms2YncaHandler::send_command(const std::string &command) {
 	catch(...) {}
 }
 
-bool Xmms2YncaHandler::send_command_with_program(const Xmms::PropDict &info) {
-	std::string command = input_command + "@MAIN:";
+bool Xmms2YncaHandler::send_commands_with_program(const Xmms::PropDict &info) {
+	std::string command;
 
 	try {
 		std::string program = boost::get<std::string>(info["ynca_program"]);
-		command.append("SOUNDPRG=" + program + "\r\n");
+		command = "@MAIN:SOUNDPRG=" + program;
 	} catch (Xmms::no_such_key_error &err) {
 		try {
 			int channels = boost::get<int>(info["channels"]);
 
 			if (channels > 2) {
-				command.append("STRAIGHT=On\r\n");
+				command = "@MAIN:STRAIGHT=On";
 			} else {
-				command.append("SOUNDPRG=" + *default_program + "\r\n");
+				command = "@MAIN:SOUNDPRG=" + *default_program;
 			}
 		} catch (Xmms::no_such_key_error &err) {
-			command.append("SOUNDPRG=" + *default_program + "\r\n");
+			command = "@MAIN:SOUNDPRG=" + *default_program;
 		}
 	}
 
-	send_command(command);
+	std::vector<const std::string*> commands(input_commands);
+	commands.push_back(&command);
+	send_commands(commands);
+
 	return false;
 }
 
